@@ -10,6 +10,7 @@ pub struct Options<'a> {
   pub update_sources: bool,
   pub cache_path: OsString,
   pub tldr_url: Option<&'a str>,
+  pub height_lines: usize,
 }
 
 impl<'a> Options<'a> {
@@ -28,10 +29,15 @@ impl<'a> Options<'a> {
         data_home.join(crate::APP_NAME).into_os_string()
       });
     let tldr_url = args.value_of("tldr-url");
+    let height_lines = args
+      .value_of("height-lines")
+      .and_then(|v| v.parse::<usize>().ok())
+      .unwrap_or(10);
     Options {
       update_sources,
       cache_path,
       tldr_url,
+      height_lines,
     }
   }
 }

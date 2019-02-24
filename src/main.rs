@@ -3,52 +3,63 @@ extern crate dirs;
 extern crate failure;
 extern crate futures;
 extern crate serde_derive;
-extern crate skim;
+extern crate termion;
 
-use std::io::BufReader;
-use std::sync::mpsc::sync_channel;
+use std::sync::mpsc::channel;
 use std::thread;
 
 use clap::{App, Arg, ArgMatches};
 use failure::Error;
-use iter_read::IterRead;
 
 mod commands;
+mod curses;
+mod events;
+mod finder;
+mod interface;
+mod matcher;
 mod options;
+mod reader;
 mod tldr;
-
-use skim::{Skim, SkimOptions};
 
 pub const APP_NAME: &str = env!("CARGO_PKG_NAME");
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const BUF_SIZE: usize = 10;
-
-pub fn main() {
+pub fn main() -> Result<(), std::io::Error> {
     let args = get_args();
     let options = options::Options::from_args(&args);
     if options.update_sources {
         let updater = tldr::Updater::new(options.tldr_url, options.cache_path.clone());
         match_result(updater.update());
     }
-    let (tx, rx) = sync_channel(BUF_SIZE);
-    let commands = commands::Commands::new(options.cache_path);
+    let (lines_tx, lines_rx) = channel();
+    let commands = commands::Commands::new(options.cache_path.clone());
 
-    thread::spawn(move || commands.parse(&tx));
-    let options: SkimOptions = SkimOptions::default()
-        .height("30%")
-        .prompt("Search: ")
-        .reverse(true);
+    thread::spawn(move || commands.parse(&lines_tx));
+    let (finder_tx, finder_rx) = channel();
+    let mut reader = reader::Reader::new(finder_tx.clone());
+    thread::spawn(move || {
+        reader.run(lines_rx);
+    });
 
-    let iter_read = IterRead::new(rx.into_iter());
+    let (interface_tx, interface_rx) = channel();
 
-    let selected_items = Skim::run_with(&options, Some(Box::new(BufReader::new(iter_read))))
-        .map(|out| out.selected_items)
-        .unwrap_or_else(Vec::new);
+    let mut finder = finder::Finder::new(interface_tx.clone());
+    thread::spawn(move || {
+        finder.run(finder_rx);
+    });
 
-    for item in selected_items.iter() {
-        print!("{}: {}{}", item.get_index(), item.get_output_text(), "\n");
-    }
+    let mut interface = interface::Interface::new(&options, finder_tx.clone());
+    interface.init();
+    let interface_thread = thread::spawn(move || interface.events_loop(interface_rx));
+
+    let command_reader = interface::CommandReader::new(interface_tx);
+    command_reader.input_loop();
+
+    interface_thread
+        .join()
+        .expect("Unable to join interface thread.");
+
+    Ok(())
 }
 
 fn match_result<T>(res: Result<T, Error>) {
@@ -79,6 +90,11 @@ fn get_args<'a>() -> ArgMatches<'a> {
             Arg::with_name("tldr-url")
                 .long("tldr-url")
                 .help("URL to fetch the TLDR archive"),
+        )
+        .arg(
+            Arg::with_name("height-lines")
+                .long("height")
+                .help("Lines for the preview window"),
         )
         .arg(Arg::with_name("input").index(1).help("string to search"))
         .get_matches()
